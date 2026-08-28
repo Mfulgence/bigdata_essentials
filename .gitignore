@@ -1,0 +1,12 @@
+data/*.csv
+data/*.parquet
+data/raw/
+data/cleaned/
+data/sample.csv
+results/
+reports/figures/*.png
+*_cleaning_report.json
+*_pandas_revenue.csv
+__pycache__/
+*.pyc
+.DS_Store
