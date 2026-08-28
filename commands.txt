@@ -1,0 +1,249 @@
+# commands.txt
+# All HDFS and Hadoop Streaming commands needed to reproduce this project.
+# Run from the repo root unless noted. Replace $HADOOP_HOME if not exported.
+# See WALKTHROUGH.md for the explanation behind every step below.
+
+# ============================================================
+# 0. Sanity check: services running
+# ============================================================
+jps
+# Expect to see: NameNode, DataNode, ResourceManager, NodeManager
+# (SecondaryNameNode too, if pseudo-distributed)
+
+
+# ============================================================
+# 1. Create the HDFS directory structure (Section 6)
+# ============================================================
+hdfs dfs -mkdir -p /taxi_project/input/raw
+hdfs dfs -mkdir -p /taxi_project/input/cleaned
+hdfs dfs -mkdir -p /taxi_project/output/hourly
+hdfs dfs -mkdir -p /taxi_project/output/daily
+hdfs dfs -mkdir -p /taxi_project/output/locations
+hdfs dfs -mkdir -p /taxi_project/output/revenue
+hdfs dfs -mkdir -p /taxi_project/output/payment
+hdfs dfs -mkdir -p /taxi_project/output/distance
+hdfs dfs -mkdir -p /taxi_project/output/routes
+hdfs dfs -mkdir -p /taxi_project/output/duration
+hdfs dfs -mkdir -p /taxi_project/output/anomalies
+hdfs dfs -mkdir -p /taxi_project/output/top_revenue
+hdfs dfs -mkdir -p /taxi_project/archive
+# NOTE: hadoop-streaming FAILS if the -output directory already exists.
+# The `-mkdir -p` calls above just create the PARENT; before each job
+# below, hdfs dfs -rm -r the specific output dir if you are re-running it.
+
+# rmdir the specific job outputs the mkdir above pre-created, since
+# streaming needs to create them itself on first run:
+hdfs dfs -rmdir /taxi_project/output/hourly /taxi_project/output/daily \
+  /taxi_project/output/locations /taxi_project/output/revenue \
+  /taxi_project/output/payment /taxi_project/output/distance \
+  /taxi_project/output/routes /taxi_project/output/duration \
+  /taxi_project/output/anomalies /taxi_project/output/top_revenue
+
+
+# ============================================================
+# 2. Convert Parquet -> CSV, then clean (Sections 5 and 7)
+# ============================================================
+# Download monthly parquet files manually from:
+#   https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page
+# into data/raw/ (e.g. yellow_tripdata_2024-01.parquet), then:
+
+mkdir -p data/raw data/cleaned
+
+python scripts/convert_parquet_to_csv.py \
+  data/raw/yellow_tripdata_2024-01.parquet \
+  data/raw/yellow_tripdata_2024-01.csv
+# repeat for each month you use (2-3 months, per Section 2)
+
+python scripts/clean_data.py \
+  data/raw/yellow_tripdata_2024-01.csv \
+  data/cleaned/yellow_tripdata_2024-01.csv
+# repeat for each month -- prints + saves a *_cleaning_report.json
+# with counts/percentages of every rule that removed rows (Section 7)
+
+
+# ============================================================
+# 3. Upload to HDFS (Section 6)
+# ============================================================
+hdfs dfs -put data/raw/yellow_tripdata_*.csv /taxi_project/input/raw/
+hdfs dfs -put data/cleaned/yellow_tripdata_*.csv /taxi_project/input/cleaned/
+
+hdfs dfs -ls -h /taxi_project/input/raw/
+hdfs dfs -ls -h /taxi_project/input/cleaned/
+hdfs dfs -du -h /taxi_project/input/raw/
+hdfs dfs -du -h /taxi_project/input/cleaned/
+hdfs dfsadmin -report
+# `hdfs fsck /taxi_project/input/cleaned/<file> -files -blocks` shows
+# block placement/replication if you want block-level evidence too.
+
+
+# ============================================================
+# 4. Run every single-stage MapReduce job (Section 8)
+# All jobs read the CLEANED data.
+# ============================================================
+export STREAM_JAR=$HADOOP_HOME/share/hadoop/tools/lib/hadoop-streaming-*.jar
+
+# a) Hourly Taxi Demand
+hadoop jar $STREAM_JAR \
+  -input /taxi_project/input/cleaned \
+  -output /taxi_project/output/hourly \
+  -mapper "python3 mapper_hourly.py" \
+  -reducer "python3 reducer_hourly.py" \
+  -file mappers/mapper_hourly.py \
+  -file reducers/reducer_hourly.py
+
+# b) Daily Demand
+hadoop jar $STREAM_JAR \
+  -input /taxi_project/input/cleaned \
+  -output /taxi_project/output/daily \
+  -mapper "python3 mapper_daily.py" \
+  -reducer "python3 reducer_daily.py" \
+  -file mappers/mapper_daily.py \
+  -file reducers/reducer_daily.py
+
+# c) Pickup Location Analysis
+hadoop jar $STREAM_JAR \
+  -input /taxi_project/input/cleaned \
+  -output /taxi_project/output/locations \
+  -mapper "python3 mapper_location.py" \
+  -reducer "python3 reducer_location.py" \
+  -file mappers/mapper_location.py \
+  -file reducers/reducer_location.py
+
+# d) Revenue by Pickup Location  (= JOB 1 of the multi-stage workflow)
+hadoop jar $STREAM_JAR \
+  -input /taxi_project/input/cleaned \
+  -output /taxi_project/output/revenue \
+  -mapper "python3 mapper_revenue.py" \
+  -reducer "python3 reducer_revenue.py" \
+  -file mappers/mapper_revenue.py \
+  -file reducers/reducer_revenue.py
+
+# e) Payment Method Analysis
+hadoop jar $STREAM_JAR \
+  -input /taxi_project/input/cleaned \
+  -output /taxi_project/output/payment \
+  -mapper "python3 mapper_payment.py" \
+  -reducer "python3 reducer_payment.py" \
+  -file mappers/mapper_payment.py \
+  -file reducers/reducer_payment.py
+
+# f) Distance-Based Fare Analysis
+hadoop jar $STREAM_JAR \
+  -input /taxi_project/input/cleaned \
+  -output /taxi_project/output/distance \
+  -mapper "python3 mapper_distance.py" \
+  -reducer "python3 reducer_distance.py" \
+  -file mappers/mapper_distance.py \
+  -file reducers/reducer_distance.py
+
+# g) Busiest Pickup-Drop-off Routes
+hadoop jar $STREAM_JAR \
+  -input /taxi_project/input/cleaned \
+  -output /taxi_project/output/routes \
+  -mapper "python3 mapper_route.py" \
+  -reducer "python3 reducer_route.py" \
+  -file mappers/mapper_route.py \
+  -file reducers/reducer_route.py
+
+# h) Trip Duration Analysis
+hadoop jar $STREAM_JAR \
+  -input /taxi_project/input/cleaned \
+  -output /taxi_project/output/duration \
+  -mapper "python3 mapper_duration.py" \
+  -reducer "python3 reducer_duration.py" \
+  -file mappers/mapper_duration.py \
+  -file reducers/reducer_duration.py
+
+# i) Anomaly Detection
+hadoop jar $STREAM_JAR \
+  -input /taxi_project/input/cleaned \
+  -output /taxi_project/output/anomalies \
+  -mapper "python3 mapper_anomaly.py" \
+  -reducer "python3 reducer_anomaly.py" \
+  -file mappers/mapper_anomaly.py \
+  -file reducers/reducer_anomaly.py
+
+
+# ============================================================
+# 5. Multi-stage MapReduce -- compulsory (Section 9)
+# JOB 2 consumes JOB 1's (the revenue job's) HDFS output directly.
+# ============================================================
+hdfs dfs -cat /taxi_project/output/revenue/part-* | head
+# ^ this is your "show the intermediate HDFS output" screenshot
+
+hadoop jar $STREAM_JAR \
+  -D mapreduce.job.reduces=1 \
+  -input /taxi_project/output/revenue \
+  -output /taxi_project/output/top_revenue \
+  -mapper "python3 mapper_top_revenue.py" \
+  -reducer "python3 reducer_top_revenue.py" \
+  -file multistage/mapper_top_revenue.py \
+  -file multistage/reducer_top_revenue.py
+
+hdfs dfs -cat /taxi_project/output/top_revenue/part-*
+# ^ final top-10 highest-revenue pickup zones
+
+
+# ============================================================
+# 6. YARN evidence (Section 11)
+# ============================================================
+yarn application -list -appStates ALL
+# Open http://localhost:8088/cluster in a browser while a job is
+# running (or right after) and screenshot: Application ID, State,
+# Start Time, Finish Time, Containers, Final Status.
+# CLI equivalent for the report / to grep the App ID programmatically:
+yarn application -status <application_id>
+
+
+# ============================================================
+# 7. Pull results out of HDFS locally, for the report + charts
+# (Section 14). getmerge concatenates all reducer part-files
+# from a job's output directory into one local file.
+# ============================================================
+mkdir -p results
+hdfs dfs -getmerge /taxi_project/output/hourly     results/hourly.tsv
+hdfs dfs -getmerge /taxi_project/output/daily      results/daily.tsv
+hdfs dfs -getmerge /taxi_project/output/locations  results/location.tsv
+hdfs dfs -getmerge /taxi_project/output/revenue    results/revenue.tsv
+hdfs dfs -getmerge /taxi_project/output/payment    results/payment.tsv
+hdfs dfs -getmerge /taxi_project/output/distance   results/distance.tsv
+hdfs dfs -getmerge /taxi_project/output/routes     results/route.tsv
+hdfs dfs -getmerge /taxi_project/output/duration   results/duration.tsv
+hdfs dfs -getmerge /taxi_project/output/anomalies  results/anomaly.tsv
+hdfs dfs -getmerge /taxi_project/output/top_revenue results/top_revenue.tsv
+
+# Top 10 / Bottom 10 pickup zones by trip count (c):
+sort -t$'\t' -k2,2 -nr results/location.tsv | head -10   # top 10
+sort -t$'\t' -k2,2 -n  results/location.tsv | head -10   # bottom 10
+
+# Top 20 routes by trip count, and by revenue (g):
+sort -t$'\t' -k2,2 -nr results/route.tsv | head -20   # by trip count
+awk -F'\t' '{split($2,v,","); print $1"\t"v[3]}' results/route.tsv \
+  | sort -k2,2 -nr | head -20                           # by revenue (col 3 = total_revenue)
+
+# Optional: download the official zone lookup table to label zone IDs
+# with human-readable names in the report and charts:
+# curl -o data/taxi_zone_lookup.csv \
+#   "https://d37ci6vzurychx.cloudfront.net/misc/taxi+_zone_lookup.csv"
+
+
+# ============================================================
+# 8. Performance comparison -- compulsory (Section 12)
+# ============================================================
+python scripts/pandas_baseline.py data/cleaned/yellow_tripdata_2024-01.csv
+# Fill the Hadoop MapReduce column of the comparison table using the
+# YARN application page for the matching `revenue` job (see script
+# docstring for exactly which fields map to which YARN page values).
+
+
+# ============================================================
+# 9. Generate the 7 required charts (Section 14)
+# ============================================================
+python scripts/visualize.py results reports/figures
+
+
+# ============================================================
+# 10. Archive raw inputs once cleaned data is verified (optional,
+# matches the /taxi_project/archive/ folder in Section 6)
+# ============================================================
+hdfs dfs -mv /taxi_project/input/raw/*.csv /taxi_project/archive/
