@@ -42,6 +42,22 @@ def load_zone_lookup(data_dir="data"):
     return {}
 
 
+def load_kv(path, key_name, value_names):
+    """Parse 'key\\tv1,v2,v3' reducer output lines (one tab, then the
+    value packed as a comma-joined string -- see reducers/reducer_*.py)
+    into a DataFrame with columns [key_name] + value_names."""
+    rows = []
+    with open(path) as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            key, value_str = line.split("\t", 1)
+            values = [float(v) for v in value_str.split(",")]
+            rows.append([key] + values)
+    return pd.DataFrame(rows, columns=[key_name] + value_names)
+
+
 def savefig(fig, out_dir, name):
     path = os.path.join(out_dir, name)
     fig.tight_layout()
@@ -88,10 +104,9 @@ def chart_top_locations(results_dir, out_dir, zone_names):
 
 
 def chart_revenue_by_payment(results_dir, out_dir):
-    df = pd.read_csv(
-        os.path.join(results_dir, "payment.tsv"), sep="\t",
-        names=["payment_type", "trips", "total_fare", "total_tip",
-               "total_revenue", "avg_fare", "avg_tip"],
+    df = load_kv(
+        os.path.join(results_dir, "payment.tsv"), "payment_type",
+        ["trips", "total_fare", "total_tip", "total_revenue", "avg_fare", "avg_tip"],
     )
     df = df.sort_values("total_revenue", ascending=False)
     fig, ax = plt.subplots(figsize=(7, 4))
@@ -102,10 +117,9 @@ def chart_revenue_by_payment(results_dir, out_dir):
 
 
 def chart_trips_by_distance(results_dir, out_dir):
-    df = pd.read_csv(
-        os.path.join(results_dir, "distance.tsv"), sep="\t",
-        names=["bucket", "trips", "total_fare", "avg_fare", "avg_distance",
-               "avg_fare_per_mile"],
+    df = load_kv(
+        os.path.join(results_dir, "distance.tsv"), "bucket",
+        ["trips", "total_fare", "avg_fare", "avg_distance", "avg_fare_per_mile"],
     )
     df["bucket"] = pd.Categorical(df["bucket"], categories=DISTANCE_ORDER, ordered=True)
     df = df.sort_values("bucket")
@@ -118,9 +132,9 @@ def chart_trips_by_distance(results_dir, out_dir):
 
 
 def chart_top_routes(results_dir, out_dir, zone_names):
-    df = pd.read_csv(
-        os.path.join(results_dir, "route.tsv"), sep="\t",
-        names=["route", "trips", "total_fare", "total_revenue"],
+    df = load_kv(
+        os.path.join(results_dir, "route.tsv"), "route",
+        ["trips", "total_fare", "total_revenue"],
     )
     df = df.sort_values("trips", ascending=False).head(10)
 
