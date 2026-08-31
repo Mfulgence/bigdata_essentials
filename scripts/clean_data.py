@@ -9,19 +9,31 @@ report can justify every removal, per the assignment's instruction to
 
 Rules applied (a row is dropped if ANY of these hold):
   - missing / unparseable pickup or dropoff timestamp
-  - missing PULocationID, DOLocationID, passenger_count, trip_distance
-    or fare_amount
-  - passenger_count <= 0
+  - missing PULocationID, DOLocationID, trip_distance or fare_amount
   - trip_distance <= 0
   - fare_amount <= 0
   - dropoff_datetime <= pickup_datetime (non-positive duration)
   - trip duration > 6 hours (impossible for a normal taxi trip)
   - exact duplicate rows
 
-Records that are unusual but not impossible (e.g. 7 passengers, a
-90-mile trip, a very high fare-per-mile) are intentionally KEPT here --
-they are the job of mapper_anomaly.py / reducer_anomaly.py to flag and
-count later, on the cleaned data, without deleting them.
+passenger_count is deliberately NOT a drop condition. In current TLC
+releases a large share of trips (commonly ~25-30%) have a null
+passenger_count -- a known vendor-side reporting gap, not a sign the
+rest of the row is unreliable. Every other field on those rows
+(timestamps, locations, distance, fare) is perfectly valid, and
+passenger_count itself is used by exactly one downstream job
+(mapper_anomaly.py's high-passenger-count flag). Dropping ~30% of
+otherwise-good, revenue-bearing trips over one lightly-used field
+would distort every other analysis (demand, revenue, routes) far more
+than it protects. Missing values are instead imputed with 1 (a single
+passenger), the most common real value and TLC's own documented
+default -- counted separately below as
+missing_passenger_count_imputed, never silently absorbed into
+"rows kept" without disclosure. Records that are unusual but not
+impossible (e.g. 7 passengers, a 90-mile trip, a very high
+fare-per-mile) are intentionally KEPT here -- they are the job of
+mapper_anomaly.py / reducer_anomaly.py to flag and count later, on the
+cleaned data, without deleting them.
 
 Usage:
     python clean_data.py data/raw/yellow_tripdata_2024-01.csv \
@@ -35,7 +47,7 @@ CHUNK_SIZE = 500_000
 
 REQUIRED_COLUMNS = [
     "tpep_pickup_datetime", "tpep_dropoff_datetime", "PULocationID",
-    "DOLocationID", "passenger_count", "trip_distance", "fare_amount",
+    "DOLocationID", "trip_distance", "fare_amount",
 ]
 
 
@@ -45,6 +57,10 @@ def clean_chunk(df, counters):
     missing_mask = df[REQUIRED_COLUMNS].isna().any(axis=1)
     counters["missing_required_field"] += int(missing_mask.sum())
     df = df[~missing_mask].copy()
+
+    missing_passengers = df["passenger_count"].isna()
+    counters["missing_passenger_count_imputed"] += int(missing_passengers.sum())
+    df["passenger_count"] = df["passenger_count"].fillna(1)
 
     df["tpep_pickup_datetime"] = pd.to_datetime(
         df["tpep_pickup_datetime"], errors="coerce"
@@ -87,6 +103,7 @@ def main():
     counters = {
         "rows_seen": 0,
         "missing_required_field": 0,
+        "missing_passenger_count_imputed": 0,
         "invalid_timestamp": 0,
         "invalid_passenger_count": 0,
         "invalid_distance": 0,
